@@ -15,6 +15,48 @@ concurrency:
 jobs:
   trigger:
     runs-on: ubuntu-latest
+name: Zeno pipeline scheduler
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zeno-staging-pipeline
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run Zeno staging orchestrator
+        env:
+          GH_ACTIONS_TOKEN: ${{ github.token }}
+          SITES_DISPATCH_TOKEN: ${{ secrets.SITES_DISPATCH_TOKEN }}
+          ZENO_PIPELINE_URL: https://zeno-auctions-staging.efisio-polidoro.chatgpt.site/api/system/pipeline/run
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SITES_DISPATCH_TOKEN}" ]; then
+            echo "Missing repository secret: SITES_DISPATCH_TOKEN"
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+          status="$(curl --silent --show-error --request POST --header "Accept: application/json" --header "Authorization: Bearer ${GH_ACTIONS_TOKEN}" --header "OAI-Sites-Authorization: Bearer ${SITES_DISPATCH_TOKEN}" --header "X-Zeno-Scheduler: github-actions" --header "X-Zeno-Schedule: */5 * * * *" --output "${response_file}" --write-out "%{http_code}" "${ZENO_PIPELINE_URL}")"
+
+          cat "${response_file}"
+          echo
+
+          if [ "${status}" -lt 200 ] || [ "${status}" -ge 300 ]; then
+            echo "Zeno orchestrator returned HTTP ${status}"
+            exit 1
+          fi
     timeout-minutes: 10
     steps:
       - name: Run Zeno staging orchestrator
