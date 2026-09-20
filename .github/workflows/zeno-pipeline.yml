@@ -20,6 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
+      - uses: actions/checkout@v4
+      - name: Recover blocked public market research
+        env:
+          GH_ACTIONS_TOKEN: ${{ github.token }}
+          SITES_DISPATCH_TOKEN: ${{ secrets.SITES_DISPATCH_TOKEN }}
+          ZENO_MARKET_RESEARCH_URL: https://zeno-auctions-staging.efisio-polidoro.chatgpt.site/api/system/market/browser-research
+        run: python3 market_browser_research.py
       - name: Drain ready Zeno staging work
         env:
           GH_ACTIONS_TOKEN: ${{ github.token }}
