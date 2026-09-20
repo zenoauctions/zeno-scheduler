@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/zeno-pipeline.yml"
 
 permissions:
   contents: read
@@ -15,9 +18,9 @@ concurrency:
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
-      - name: Run Zeno staging orchestrator
+      - name: Drain ready Zeno staging work
         env:
           GH_ACTIONS_TOKEN: ${{ github.token }}
           SITES_DISPATCH_TOKEN: ${{ secrets.SITES_DISPATCH_TOKEN }}
@@ -25,18 +28,50 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${SITES_DISPATCH_TOKEN}" ]; then
-            echo "Missing repository secret: SITES_DISPATCH_TOKEN"
-            exit 1
-          fi
-
-          response_file="$(mktemp)"
-          status="$(curl --silent --show-error --request POST --header "Accept: application/json" --header "Authorization: Bearer ${GH_ACTIONS_TOKEN}" --header "OAI-Sites-Authorization: Bearer ${SITES_DISPATCH_TOKEN}" --header "X-Zeno-Scheduler: github-actions" --header "X-Zeno-Schedule: */5 * * * *" --output "${response_file}" --write-out "%{http_code}" "${ZENO_PIPELINE_URL}")"
-
-          cat "${response_file}"
-          echo
-
-          if [ "${status}" -lt 200 ] || [ "${status}" -ge 300 ]; then
-            echo "Zeno orchestrator returned HTTP ${status}"
-            exit 1
-          fi
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          if not os.environ.get("SITES_DISPATCH_TOKEN"):
+              raise SystemExit("Required dispatch credential is missing")
+          deadline = time.monotonic() + 30 * 60
+          continuation = False
+          failures = 0
+          while time.monotonic() < deadline:
+              request = urllib.request.Request(os.environ["ZENO_PIPELINE_URL"], data=b"", method="POST", headers={
+                  "Accept": "application/json",
+                  "Authorization": "Bearer " + os.environ["GH_ACTIONS_TOKEN"],
+                  "OAI-Sites-Authorization": "Bearer " + os.environ["SITES_DISPATCH_TOKEN"],
+                  "X-Zeno-Scheduler": "github-actions",
+                  "X-Zeno-Schedule": "*/5 * * * *",
+                  "X-Zeno-Continuation": "1" if continuation else "0",
+              })
+              try:
+                  with urllib.request.urlopen(request, timeout=120) as response:
+                      result = json.load(response)
+                  if result.get("ok") is not True:
+                      raise ValueError("Invalid scheduler response")
+                  # Only execution signals cross this boundary. Never print response bodies.
+                  signal = result.get("continuation")
+                  if not isinstance(signal, dict) or not isinstance(signal.get("continue"), bool):
+                      raise ValueError("Missing continuation contract")
+                  failures = 0
+                  if result.get("status") != "skipped":
+                      continuation = True
+                  if not signal["continue"]:
+                      print("Automatic queue is idle; watchdog remains scheduled.")
+                      break
+                  delay = max(2, min(60, int(signal.get("retry_after_seconds", 30))))
+                  print("Cycle accepted; continuing automatically.", flush=True)
+              except urllib.error.HTTPError as error:
+                  if error.code in (401, 403):
+                      raise SystemExit("Scheduler authorization failed")
+                  failures += 1
+                  delay = min(60, 10 * failures)
+                  print("Transient request failure; bounded retry.", flush=True)
+              except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+                  failures += 1
+                  delay = min(60, 10 * failures)
+                  print("Transient request failure; bounded retry.", flush=True)
+              time.sleep(min(delay, max(0, deadline - time.monotonic())))
+          else:
+              print("Runner window ended; queued watchdog takes over.")
+          PY
