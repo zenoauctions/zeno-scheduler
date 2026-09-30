@@ -31,18 +31,21 @@ jobs:
         env:
           GH_ACTIONS_TOKEN: ${{ github.token }}
           SITES_DISPATCH_TOKEN: ${{ secrets.SITES_DISPATCH_TOKEN }}
+          ZENO_MARKET_RESEARCH_URL: https://zeno-auctions-staging.efisio-polidoro.chatgpt.site/api/system/market/browser-research
           ZENO_PIPELINE_URL: https://zeno-auctions-staging.efisio-polidoro.chatgpt.site/api/system/pipeline/run
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, time, urllib.request, urllib.error
+          import json, os, time, urllib.request, urllib.error, subprocess
           if not os.environ.get("SITES_DISPATCH_TOKEN"):
               raise SystemExit("Required dispatch credential is missing")
           deadline = time.monotonic() + 30 * 60
           continuation = False
           failures = 0
           while time.monotonic() < deadline:
+              # Same browser step, receipt-only mode; resume pending A2 retrieval within this drain.
+              subprocess.run(["python3", "market_browser_research.py", "--a2-only"], check=True, timeout=480)
               request = urllib.request.Request(os.environ["ZENO_PIPELINE_URL"], data=b"", method="POST", headers={
                   "Accept": "application/json",
                   "Authorization": "Bearer " + os.environ["GH_ACTIONS_TOKEN"],
@@ -82,3 +85,4 @@ jobs:
           else:
               print("Runner window ended; queued watchdog takes over.")
           PY
+
