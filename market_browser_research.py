@@ -24,18 +24,25 @@ def record_market_recovery_failure(phase,global_failure):
  print(json.dumps(receipt,sort_keys=True),flush=True)
  print("::error title=MARKET_BROWSER_RECOVERY_FAILED::HTTP 503; outcome=FAILED; phase="+phase,flush=True)
 
+def market_classifier_rejected(reason):
+ # Diagnostics only: output failure must not change the existing decision.
+ try:print(json.dumps({"event":"MARKET_BROWSER_CLASSIFIER_REJECTED","reason":reason},sort_keys=True),file=sys.stderr,flush=True)
+ except Exception:pass
+ return False
+
 def recoverable_market_503(error):
  # Only a bounded, structured non-global failure is eligible. Never log raw bodies.
  try:
   raw=error.read(16385)
-  if len(raw)>16384:return False
-  body=json.loads(raw)
- except (OSError,ValueError):return False
- if not isinstance(body,dict):return False
+ except (OSError,ValueError):return market_classifier_rejected("BODY_UNAVAILABLE")
+ if len(raw)>16384:return market_classifier_rejected("BODY_TOO_LARGE")
+ try:body=json.loads(raw)
+ except (OSError,ValueError):return market_classifier_rejected("BODY_NOT_JSON")
+ if not isinstance(body,dict):return market_classifier_rejected("BODY_NOT_OBJECT")
  for item in walk(body):
-  if isinstance(item.get("protection"),dict) and item["protection"].get("ready") is False:return False
+  if isinstance(item.get("protection"),dict) and item["protection"].get("ready") is False:return market_classifier_rejected("PROTECTION_NOT_READY")
   for value in item.values():
-   if isinstance(value,str) and re.search(r"(?:COST|TRIAGE|REVISION)_PROTECTION",value):return False
+   if isinstance(value,str) and re.search(r"(?:COST|TRIAGE|REVISION)_PROTECTION",value):return market_classifier_rejected("GLOBAL_FAILURE_MARKER")
  return True
 
 def api(method,payload=None,experimental=False):
