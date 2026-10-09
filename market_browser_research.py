@@ -2,15 +2,53 @@
 """Bounded public-browser fallback. No lot data or credentials are persisted."""
 import html,json,os,re,shutil,subprocess,urllib.parse,urllib.request
 import base64,hashlib,select,sys,tempfile,time,datetime
+import urllib.error
 
 URL=os.environ["ZENO_MARKET_RESEARCH_URL"]
 HEAD={"Accept":"application/json","Authorization":"Bearer "+os.environ["GH_ACTIONS_TOKEN"],"OAI-Sites-Authorization":"Bearer "+os.environ["SITES_DISPATCH_TOKEN"],"X-Zeno-Scheduler":"github-actions"}
 SLUG={"audemars piguet":"audemarspiguet","jaeger lecoultre":"jaegerlecoultre","patek philippe":"patekphilippe","tag heuer":"tagheuer","vacheron constantin":"vacheronconstantin"}
 
+class RecoverableMarketRecoveryFailure(Exception):
+ """Optional task completed; market recovery remains FAILED, not evidence."""
+
+def record_market_recovery_failure(phase,global_failure):
+ receipt={"event":"MARKET_BROWSER_RECOVERY_FAILED","outcome":"FAILED","http_status":503,
+  "phase":phase,"timestamp":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  "global_failure":global_failure}
+ summary=os.environ.get("GITHUB_STEP_SUMMARY")
+ if not summary:raise RuntimeError("MARKET_BROWSER_RECOVERY_AUDIT_UNAVAILABLE")
+ # Persist before permitting the optional recovery to return zero.
+ with open(summary,"a",encoding="utf-8") as target:
+  target.write("\n### MARKET_BROWSER_RECOVERY_FAILED\n```json\n"+json.dumps(receipt,sort_keys=True)+"\n```\n")
+  target.flush()
+ print(json.dumps(receipt,sort_keys=True),flush=True)
+ print("::error title=MARKET_BROWSER_RECOVERY_FAILED::HTTP 503; outcome=FAILED; phase="+phase,flush=True)
+
+def recoverable_market_503(error):
+ # Only a bounded, structured non-global failure is eligible. Never log raw bodies.
+ try:
+  raw=error.read(16385)
+  if len(raw)>16384:return False
+  body=json.loads(raw)
+ except (OSError,ValueError):return False
+ if not isinstance(body,dict):return False
+ for item in walk(body):
+  if isinstance(item.get("protection"),dict) and item["protection"].get("ready") is False:return False
+  for value in item.values():
+   if isinstance(value,str) and re.search(r"(?:COST|TRIAGE|REVISION)_PROTECTION",value):return False
+ return True
+
 def api(method,payload=None,experimental=False):
  body=None if payload is None else json.dumps(payload,separators=(",",":")).encode()
  request=urllib.request.Request(URL+("?mode=a2" if experimental else ""),data=body,method=method,headers={**HEAD,**({"Content-Type":"application/json"} if body else {})})
- with urllib.request.urlopen(request,timeout=120) as response:return json.load(response)
+ try:
+  with urllib.request.urlopen(request,timeout=120) as response:return json.load(response)
+ except urllib.error.HTTPError as error:
+  if method!="GET" or error.code!=503 or urllib.parse.urlparse(URL).path!="/api/system/market/browser-research":raise
+  recoverable=recoverable_market_503(error)
+  record_market_recovery_failure("A2_PUBLIC_RETRIEVAL" if experimental else "MARKET_BROWSER_RECOVERY",not recoverable)
+  if not recoverable:raise
+  raise RecoverableMarketRecoveryFailure() from error
 
 def page(chrome,url):
  result=subprocess.run([chrome,"--headless=new","--disable-gpu","--no-sandbox","--disable-dev-shm-usage","--disable-background-networking","--virtual-time-budget=8000","--dump-dom",url],capture_output=True,text=True,timeout=35)
@@ -160,4 +198,6 @@ def main():
   accepted+=int(api("POST",snapshot(chrome,task),experimental=True).get("accepted",0))
  print(f"Experimental public retrieval: {len(tasks)} task(s), {accepted} receipt(s).")
 
-if __name__=="__main__":main()
+if __name__=="__main__":
+ try:main()
+ except RecoverableMarketRecoveryFailure:pass
